@@ -24,6 +24,26 @@ Sub-Store 后端的 Cloudflare Workers 移植版
 >
 > **自动部署**：本仓库已内置 GitHub Actions 工作流，每天自动检测上游 Sub-Store 更新并部署到 Cloudflare。只需配置 Secrets 即可开启，无需本地操作。详见 [GitHub Actions 自动同步上游](#同步更新)。
 
+## 修复 / 改进 (v1.2.0)
+
+本分支在原始 `Yu9191/sub-store-workers` 的基础上修复了以下问题，并补充了一套针对 Workers 适配层的烟雾测试。
+
+| 类型 | 修复内容 |
+|---|---|
+| 安全 | 之前 `isPublicPath` 正则把 `/api/preview/*`、`/api/sub/flow/*` 当成公共路径直接放行，未配置密码时这两类敏感管理 API 也能被任意访问。重写鉴权流程为「带 `/<密码>` 前缀剥离 → 命中 `/api/*` 走管理 API；否则 `/share/*`、`/download/*` 公开」。 |
+| 功能 | `SUB_STORE_FRONTEND_BACKEND_PATH` 配置以 `/api` 开头时，旧代码会先 401 再判断前缀，使整个 worker 无法访问。现在先剥离前缀再判断鉴权，并对非法配置（不以 `/` 开头）显式 500 提示。 |
+| 健壮性 | `decodeURIComponent(url.pathname)`、`extractPathParams` 在遇到错误的 `%xx` 序列时会抛 `URIError`，导致整个请求 500。已改为安全降级到原值。 |
+| 健壮性 | `dispatchRoute` 路由评分用 `path.length` 给正则路由打分，长 URL 时正则路由会吃掉所有更具体的字符串路由。改为：字符串路由按段数计分，正则路由统一记 1 段。 |
+| 健壮性 | KV 持久化用 `_dirty` 单标志位，并发请求 / `ctx.waitUntil` 串行执行时可能丢失变更；改为按内容快照对比，写入失败时不更新快照，避免数据丢失。 |
+| 健壮性 | `Promise.prototype.delay` 之前在 `OpenAPI` 构造函数里挂载，每次实例化都重写。改为模块加载时一次性注入。 |
+| 上游 bug | 上游 `subscriptions.js` 在 `findByName` 返回 `undefined` 时直接 `delete sub.subscriptions` 会抛 `TypeError`，使 `GET /api/sub/:name` 对不存在的订阅返回 500。esbuild 构建期补齐 null 守卫。`updateSubscription` 同理对 `req.body` 加默认值。 |
+| 兼容 | CORS 预检 `Access-Control-Allow-Methods: *` / `Access-Control-Allow-Headers: *` 在 Safari 等老 WebKit 上会被拒。改为显式列出方法和头。 |
+| 体验 | 增加 `/healthz` 公开探活端点，无需 KV、不进鉴权，可用于平台监控和 GitHub Actions 健康检查。 |
+| 构建 | esbuild source map 默认关闭（`SUB_STORE_SOURCEMAP=true` 才开），`legalComments: 'none'`，输出 bundle 体积进一步收紧。 |
+| 测试 | 新增 `test/smoke.mjs`（Node 内置 `node --test` 跑），覆盖鉴权、CORS、健康检查、KV 持久化、错误降级共 16 条用例，`npm test` 一键跑通。 |
+
+详见各 src/* 文件 commit 历史。
+
 ## 简介
 
 将 [Sub-Store](https://github.com/sub-store-org/Sub-Store) 后端部署到 Cloudflare Workers / Pages，无需服务器，免费使用。

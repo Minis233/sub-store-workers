@@ -119,6 +119,21 @@ const evalRewritePlugin = {
                 );
             }
 
+            // 上游 bug 修复：subscriptions.js 在 findByName 返回 undefined 时
+            // 直接 delete sub.subscriptions 会抛 TypeError，使 GET /api/sub/:name
+            // 对不存在的订阅返回 500 而非 404。补一行 null 守卫即可。
+            if (args.path.endsWith(path.join('restful', 'subscriptions.js'))) {
+                contents = contents.replace(
+                    /(const sub = findByName\(allSubs, name\);\s*)delete sub\.subscriptions;/g,
+                    '$1if (sub) delete sub.subscriptions;',
+                );
+                // updateSubscription 用 req.body — body 可能是 null
+                contents = contents.replace(
+                    /let sub = req\.body;\s*delete sub\.subscriptions;/,
+                    'let sub = req.body || {};\n    delete sub.subscriptions;',
+                );
+            }
+
             if (contents !== original) {
                 return {
                     contents,
@@ -268,7 +283,7 @@ const nodeStubPlugin = {
         entryPoints: [path.join(WORKERS_SRC, 'index.js')],
         bundle: true,
         minify: true,
-        sourcemap: true,
+        sourcemap: process.env.SUB_STORE_SOURCEMAP === 'true',
         platform: 'browser', // Workers 运行时
         format: 'esm',
         target: 'es2022',
@@ -281,6 +296,7 @@ const nodeStubPlugin = {
         nodePaths: [path.resolve(__dirname, 'node_modules')],
         // Workers 包体积限制
         logLevel: 'info',
+        legalComments: 'none',
     });
 
     const stats = fs.statSync(path.join(__dirname, 'dist', 'worker.js'));

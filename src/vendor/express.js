@@ -6,9 +6,9 @@ export default function express({ substore: $ }) {
     const DEFAULT_HEADERS = {
         'Content-Type': 'text/plain;charset=UTF-8',
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST,GET,OPTIONS,PATCH,PUT,DELETE',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD',
         'Access-Control-Allow-Headers':
-            'Origin, X-Requested-With, Content-Type, Accept',
+            'Origin, X-Requested-With, Content-Type, Accept, Authorization',
         'X-Powered-By': 'Sub-Store-Workers',
     };
 
@@ -64,9 +64,16 @@ export default function express({ substore: $ }) {
 
         const url = new URL(request.url);
         const method = request.method.toUpperCase();
-        const path = decodeURIComponent(url.pathname);
+        // 安全解码 pathname；遇到错误的 %xx 序列降级到原值，不要让请求 500
+        let path;
+        try {
+            path = decodeURIComponent(url.pathname);
+        } catch (e) {
+            path = url.pathname;
+        }
         const query = {};
         url.searchParams.forEach((value, key) => {
+            // 多值同名参数：保留最后一个（与上游解析行为一致）
             query[key] = value;
         });
 
@@ -124,7 +131,7 @@ export default function express({ substore: $ }) {
                 return this;
             },
             set(key, val) {
-                if (typeof key === 'object') {
+                if (typeof key === 'object' && key !== null) {
                     Object.assign(resHeaders, key);
                 } else {
                     resHeaders[key] = val;
@@ -142,8 +149,20 @@ export default function express({ substore: $ }) {
             send(body = '') {
                 if (responded) return;
                 responded = true;
+                // 如果 body 是 Uint8Array / ArrayBuffer / Blob 直接透传，避免被字符串化
+                let payload = body;
+                if (
+                    body != null &&
+                    typeof body !== 'string' &&
+                    !(body instanceof Uint8Array) &&
+                    !(body instanceof ArrayBuffer) &&
+                    !(typeof Blob !== 'undefined' && body instanceof Blob) &&
+                    !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream)
+                ) {
+                    payload = String(body);
+                }
                 responseResolve(
-                    new Response(body, {
+                    new Response(payload, {
                         status: resStatusCode,
                         headers: resHeaders,
                     }),
@@ -232,23 +251,26 @@ export default function express({ substore: $ }) {
     // 匹配最优路由
     async function dispatchRoute(method, path, query, req, res) {
         let handler = null;
-        let longestMatchedPattern = 0;
+        let bestScore = -1;
 
         for (let i = 0; i < handlers.length; i++) {
-            if (
-                handlers[i].method === 'ALL' ||
-                method === handlers[i].method
-            ) {
-                const { pattern } = handlers[i];
-                if (patternMatched(pattern, path)) {
-                    const len =
-                        typeof pattern === 'string'
-                            ? pattern.split('/').length
-                            : path.length;
-                    if (len > longestMatchedPattern) {
-                        handler = handlers[i];
-                        longestMatchedPattern = len;
-                    }
+            const h = handlers[i];
+            if (h.method !== 'ALL' && method !== h.method) continue;
+            const { pattern } = h;
+            if (!patternMatched(pattern, path)) continue;
+            // 评分：字符串路由用段数；正则路由统一给 1 段，避免吃掉所有更具体的字符串路由。
+            // 同分时方法精确（非 ALL）优先；再同分时取靠后注册的（保留原行为）。
+            const score = typeof pattern === 'string'
+                ? pattern.split('/').length
+                : 1;
+            if (score > bestScore) {
+                handler = h;
+                bestScore = score;
+                continue;
+            }
+            if (score === bestScore && handler) {
+                if (handler.method === 'ALL' && h.method !== 'ALL') {
+                    handler = h;
                 }
             }
         }
@@ -264,10 +286,8 @@ export default function express({ substore: $ }) {
                     cb(req, res, () => {});
                 }
             } catch (err) {
-                res.status(500).json({
-                    status: 'failed',
-                    message: `Internal Server Error: ${err.message || err}`,
-                });
+                // 已经响应过就不能再 setStatus；上层 try 会兜底为 500
+                throw err;
             }
         }
         // 无匹配由外层 404
@@ -314,7 +334,16 @@ function extractPathParams(pattern, path) {
             while (path[j] !== '/' && j < path.length) {
                 val.push(path[j++]);
             }
-            params[key.join('')] = decodeURIComponent(val.join(''));
+            const rawVal = val.join('');
+            // 安全 decode：遇到非法 %xx 序列时，原样返回。
+            // 避免一个客户端构造的坏链接把整个服务打挂。
+            let decoded;
+            try {
+                decoded = decodeURIComponent(rawVal);
+            } catch (e) {
+                decoded = rawVal;
+            }
+            params[key.join('')] = decoded;
         } else {
             if (pattern[i] !== path[j]) {
                 return null;
