@@ -66,13 +66,14 @@ export default {
             const kvError = validateKVBinding(env);
             if (kvError) return kvError.response;
 
-            // CORS 预检
+            // CORS 预检 — 显式列出方法/头，避免某些客户端拒绝 *
             if (request.method === 'OPTIONS') {
                 return new Response(null, {
+                    status: 204,
                     headers: {
                         'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': '*',
-                        'Access-Control-Allow-Headers': '*',
+                        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD',
+                        'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Authorization',
                         'Access-Control-Max-Age': '86400',
                     },
                 });
@@ -81,27 +82,46 @@ export default {
             const url = new URL(request.url);
             let pathname = url.pathname;
 
+            // 健康检查：始终公开，不需要 KV 也不需要鉴权
+            if (pathname === '/healthz') {
+                return new Response(JSON.stringify({
+                    status: 'success',
+                    data: {
+                        ok: true,
+                        version,
+                        runtime: 'Cloudflare Workers',
+                        time: new Date().toISOString(),
+                    },
+                }), {
+                    status: 200,
+                    headers: {
+                        'Content-Type': 'application/json;charset=UTF-8',
+                        'Access-Control-Allow-Origin': '*',
+                        'Cache-Control': 'no-store',
+                    },
+                });
+            }
+
             // 路径前缀鉴权（可选）
             // 配置 SUB_STORE_FRONTEND_BACKEND_PATH = "/你的密码" 后
             // 前端后端地址填: https://xxx.pages.dev/你的密码
-            // 管理 API 需要带前缀才能访问，分享链接（download/preview）不受影响
-            const backendPath = env.SUB_STORE_FRONTEND_BACKEND_PATH;
-            const isPublicPath = /^\/(api\/download|api\/preview|api\/sub\/flow)/.test(pathname);
-            const isManagementApi = !isPublicPath && pathname.startsWith('/api/');
-            const isAuthDisabledManagementApi = !backendPath && isManagementApi;
-            if (isAuthDisabledManagementApi) {
-                console.warn(`[Security] SUB_STORE_FRONTEND_BACKEND_PATH is not configured; management API is publicly accessible: ${pathname}`);
+            // 管理 API 需要带前缀才能访问；
+            // 分享 / 下载链接路径在 /share/* 与 /download/*（不在 /api/* 下），始终公开。
+            const rawBackendPath = env.SUB_STORE_FRONTEND_BACKEND_PATH;
+            const backendPath = normalizeBackendPath(rawBackendPath);
+            if (rawBackendPath && !backendPath) {
+                console.error(`[Security] SUB_STORE_FRONTEND_BACKEND_PATH is invalid; must start with "/" and not be empty.`);
+                return new Response(JSON.stringify({
+                    status: 'failed',
+                    message: 'SUB_STORE_FRONTEND_BACKEND_PATH must start with "/"',
+                }), {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+                });
             }
+            let stripped = false;
             if (backendPath) {
-                if (!isPublicPath && pathname.startsWith('/api/')) {
-                    // 直接访问 /api/* 没带前缀，拒绝
-                    return new Response(JSON.stringify({ status: 'failed', message: 'Unauthorized' }), {
-                        status: 401,
-                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-                    });
-                }
                 if (pathname === backendPath) {
-                    // 精确匹配前缀，重定向到带 / 的路径
                     return new Response(null, {
                         status: 302,
                         headers: {
@@ -111,8 +131,8 @@ export default {
                     });
                 }
                 if (pathname.startsWith(backendPath + '/')) {
-                    // 带了前缀，剥离后交给路由
-                    pathname = pathname.slice(backendPath.length);
+                    pathname = pathname.slice(backendPath.length) || '/';
+                    stripped = true;
                     const newUrl = new URL(request.url);
                     newUrl.pathname = pathname;
                     // 通过密码前缀访问才注入 share 标记（与上游 be_merge 行为一致）
@@ -121,6 +141,17 @@ export default {
                     }
                     request = new Request(newUrl.toString(), request);
                 }
+            }
+            const isManagementApi = pathname.startsWith('/api/');
+            if (backendPath && !stripped && isManagementApi) {
+                return new Response(JSON.stringify({ status: 'failed', message: 'Unauthorized: missing path prefix' }), {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+                });
+            }
+            const isAuthDisabledManagementApi = !backendPath && isManagementApi;
+            if (isAuthDisabledManagementApi) {
+                console.warn(`[Security] SUB_STORE_FRONTEND_BACKEND_PATH is not configured; management API is publicly accessible: ${pathname}`);
             }
 
             // 注入环境变量
@@ -173,6 +204,15 @@ export default {
         }
     },
 };
+
+function normalizeBackendPath(raw) {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === '/') return null;
+    if (!trimmed.startsWith('/')) return null;
+    // 去掉末尾的 /，避免 backendPath="/abc/" 时与 pathname="/abc/api" 拼接出错
+    return trimmed.replace(/\/+$/, '') || null;
+}
 
 function validateKVBinding(env) {
     if (env?.SUB_STORE_DATA?.get && env?.SUB_STORE_DATA?.put) return null;

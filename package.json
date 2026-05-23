@@ -1,11 +1,12 @@
 {
   "name": "sub-store-workers",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Sub-Store on Cloudflare Workers",
   "private": true,
   "scripts": {
     "build": "node esbuild.js",
     "dev": "wrangler dev",
+    "test": "npm run build && node --test test/smoke.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:pages": "npm run build && node -e \"require('fs').copyFileSync('dist/worker.js','pages-dist/_worker.js')\" && wrangler pages deploy pages-dist --project-name sub-store --branch main --no-bundle",
     "rotate-secret": "powershell -ExecutionPolicy Bypass -File scripts/rotate-secret.ps1",

@@ -23,6 +23,19 @@ function isPlainObject(obj) {
     );
 }
 
+// Promise.prototype.delay — 注入一次即可，避免每次构造都重新挂载
+if (!Promise.prototype.delay) {
+    const delay = (t, v) =>
+        new Promise(function (resolve) {
+            setTimeout(resolve.bind(null, v), t);
+        });
+    // eslint-disable-next-line no-extend-native
+    Promise.prototype.delay = async function (t) {
+        const v = await this;
+        return await delay(t, v);
+    };
+}
+
 export class OpenAPI {
     constructor(name = 'untitled', debug = false) {
         this.name = name;
@@ -42,16 +55,6 @@ export class OpenAPI {
         this._rootDirty = false;
         this._cacheSnapshot = '';
         this._rootSnapshot = '';
-
-        const delay = (t, v) =>
-            new Promise(function (resolve) {
-                setTimeout(resolve.bind(null, v), t);
-            });
-
-        Promise.prototype.delay = async function (t) {
-            const v = await this;
-            return await delay(t, v);
-        };
     }
 
     /** 从 KV 初始化 */
@@ -106,28 +109,44 @@ export class OpenAPI {
     }
 
     // 回写缓存到 KV
+    // 改进点：不再用 _dirty 单标志位（可能被并发清空），改成「序列化结果与上次快照对比」。
+    // 这样即使两次 persistCache 串行执行也只会真正写入差异。
     async persistCache() {
         if (!this._kvBinding) return;
         const promises = [];
-        if (this._dirty) {
-            const current = JSON.stringify(this.cache, null, 2);
-            if (current !== this._cacheSnapshot) {
-                promises.push(this._kvBinding.put(this.name, current));
-                this._cacheSnapshot = current;
+        try {
+            const currentCache = JSON.stringify(this.cache, null, 2);
+            if (currentCache !== this._cacheSnapshot) {
+                const snapshot = currentCache;
+                promises.push(
+                    this._kvBinding
+                        .put(this.name, currentCache)
+                        .then(() => {
+                            // 仅在写入成功后更新快照，避免失败后丢失变更标记
+                            this._cacheSnapshot = snapshot;
+                        }),
+                );
             }
-            this._dirty = false;
-        }
-        if (this._rootDirty) {
-            const current = JSON.stringify(this.root, null, 2);
-            if (current !== this._rootSnapshot) {
-                promises.push(this._kvBinding.put('root', current));
-                this._rootSnapshot = current;
+            const currentRoot = JSON.stringify(this.root, null, 2);
+            if (currentRoot !== this._rootSnapshot) {
+                const snapshot = currentRoot;
+                promises.push(
+                    this._kvBinding
+                        .put('root', currentRoot)
+                        .then(() => {
+                            this._rootSnapshot = snapshot;
+                        }),
+                );
             }
-            this._rootDirty = false;
+        } catch (e) {
+            this.error(`Failed to serialize cache: ${e.message ?? e}`);
         }
         if (promises.length > 0) {
             await Promise.all(promises);
         }
+        // _dirty 留作兼容字段，逻辑上不再依赖它
+        this._dirty = false;
+        this._rootDirty = false;
     }
 
     write(data, key) {
