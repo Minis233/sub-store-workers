@@ -132,6 +132,11 @@ jobs:
         working-directory: sub-store-workers
         run: npm run build
 
+      - name: Run worker smoke tests
+        if: steps.check.outputs.needed == 'true'
+        working-directory: sub-store-workers
+        run: node --test test/smoke.mjs
+
       - name: Check worker bundle size
         if: steps.check.outputs.needed == 'true'
         id: size
@@ -219,9 +224,11 @@ jobs:
           URL="https://sub-store-workers.${{ secrets.WORKERS_SUBDOMAIN }}.workers.dev"
           for i in 1 2 3; do
             sleep 10
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL/")
-            echo "Attempt $i: HTTP $CODE"
-            if [ "$CODE" = "200" ] || [ "$CODE" = "302" ] || [ "$CODE" = "404" ]; then
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL/healthz")
+            echo "Attempt $i: HTTP $CODE for /healthz"
+            if [ "$CODE" = "200" ]; then
+              BODY=$(curl -s "$URL/healthz")
+              echo "Body: $BODY"
               echo "Worker is alive"
               exit 0
             fi

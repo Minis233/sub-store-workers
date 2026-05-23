@@ -4,3 +4,5 @@ pages-dist/_worker.js
 .wrangler/
 .dev.vars
 wrangler.toml
+.deploy-secret.txt
+DEPLOYMENT.md
